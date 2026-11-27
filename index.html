@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Inside a Mixture of Experts</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+body{margin:0}img{max-width:100%}[hidden]{display:none!important}
+/* Layout: a lab notebook on grid paper. One column of "levels"; each level unlocks the next. Ink = compute, red pen = communication, pink = waiting, yellow marker = you. */
+:root {
+  --paper: #FAFBFD; --rule: #E3E9F3; --ink: #1B2340; --pencil: #646D82; --blue: #1F4FB4; --blue-soft: #C9D7F2;
+  --red: #C62E3A; --wait: #F2A7AE; --idle: #D7DCE5; --marker: #F6D04D; --green: #22865A; --card: #FFFFFF;
+  --hand: "Kalam", "Comic Sans MS", "Bradley Hand", cursive;
+  --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --mono: "IBM Plex Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #0E1A2E; --rule: #1A2B47; --ink: #E8EEF8; --pencil: #9AA8C0; --blue: #7DA6FF; --blue-soft: #233B66;
+  --red: #FF6B76; --wait: #7A3640; --idle: #2A3A55; --marker: #E0B53A; --green: #5BD08F; --card: #13223A; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --paper: #0E1A2E; --rule: #1A2B47; --ink: #E8EEF8; --pencil: #9AA8C0; --blue: #7DA6FF; --blue-soft: #233B66;
+  --red: #FF6B76; --wait: #7A3640; --idle: #2A3A55; --marker: #E0B53A; --green: #5BD08F; --card: #13223A; color-scheme: dark }
+
+* { box-sizing: border-box; }
+body { background-color: var(--paper); color: var(--ink); font-family: var(--sans); font-size: 17px; line-height: 1.6;
+  background-image: linear-gradient(var(--rule) 1px, transparent 1px), linear-gradient(90deg, var(--rule) 1px, transparent 1px);
+  background-size: 24px 24px; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper); }
+
+/* progress path */
+.path { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--paper); border-bottom: 1.5px solid var(--ink); }
+.path-in { max-width: 980px; margin: 0 auto; padding-block: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; align-items: center; gap: 14px; }
+.stops { display: flex; gap: 6px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none; }
+.stop { flex: none; width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--pencil); display: grid; place-items: center;
+  font: 600 .8rem var(--mono); color: var(--pencil); background: var(--paper); cursor: default; }
+.stop.done { background: var(--ink); color: var(--paper); border-color: var(--ink); cursor: pointer; }
+.stop.here { background: var(--marker); color: #1B2340; border-color: var(--ink); cursor: pointer; }
+.xp { font: 700 1.05rem var(--hand); white-space: nowrap; }
+.xp b { font-family: var(--mono); font-size: .95rem; }
+
+.wrap { max-width: 980px; margin: 0 auto; padding-block: 36px 80px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 56px; }
+
+.cover { display: flex; flex-direction: column; gap: 14px; padding-top: 12px; }
+.cover h1 { font: 700 clamp(2.4rem, 7vw, 4.4rem)/1.02 var(--cond); margin: 0; letter-spacing: -.01em; text-wrap: balance; }
+.cover h1 mark { background: linear-gradient(transparent 55%, var(--marker) 55%); color: inherit; padding: 0 .1em; }
+.scribble { font: 400 1.35rem/1.35 var(--hand); color: var(--blue); max-width: 46ch; }
+.who { font: .9rem var(--mono); color: var(--pencil); }
+
+section.level { display: flex; flex-direction: column; gap: 18px; scroll-margin-top: 70px; }
+.lv { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.lv .tag { font: 600 .8rem var(--mono); border: 1.5px solid var(--ink); padding: 2px 8px; border-radius: 4px; background: var(--card); }
+h2 { font: 700 clamp(1.6rem, 4vw, 2.3rem)/1.1 var(--cond); margin: 0; text-wrap: balance; }
+p { margin: 0; max-width: 66ch; }
+.note { font: 400 1.2rem/1.4 var(--hand); color: var(--blue); max-width: 60ch; }
+.sheet { background: var(--card); border: 1.5px solid var(--ink); border-radius: 6px; padding: 18px; display: flex; flex-direction: column; gap: 14px;
+  box-shadow: 4px 4px 0 var(--ink); min-width: 0; }
+.fig { width: 100%; overflow-x: auto; }
+.fig svg { display: block; width: 100%; height: auto; min-width: 560px; }
+svg text { font-family: var(--mono); font-size: 12px; fill: var(--pencil); }
+svg .hand { font-family: var(--hand); font-size: 17px; fill: var(--blue); }
+
+.row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.btn { font: 600 .95rem var(--sans); color: var(--ink); background: var(--card); border: 1.5px solid var(--ink); border-radius: 6px;
+  padding: 8px 14px; cursor: pointer; box-shadow: 2px 2px 0 var(--ink); }
+.btn:hover { transform: translate(-1px, -1px); box-shadow: 3px 3px 0 var(--ink); }
+.btn:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
+.btn.go { background: var(--marker); color: #1B2340; }
+.btn[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.btn:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--ink); }
+button:focus-visible { outline: 3px solid var(--marker); outline-offset: 2px; }
+.ctl { display: flex; flex-direction: column; gap: 6px; }
+.ctl > span { font: 600 .75rem var(--mono); color: var(--pencil); letter-spacing: .06em; text-transform: uppercase; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg .btn { padding: 6px 11px; font-size: .88rem; box-shadow: none; }
+.seg .btn:hover { transform: none; box-shadow: none; }
+.task { font: 600 .9rem var(--mono); color: var(--pencil); display: flex; gap: 8px; align-items: center; }
+.task.ok { color: var(--green); }
+.next { align-self: flex-start; }
+.locked { border: 1.5px dashed var(--pencil); border-radius: 6px; padding: 18px; color: var(--pencil); font: 1.15rem var(--hand); }
+
+.grid { display: grid; gap: 3px; }
+.grid i { aspect-ratio: 1; border-radius: 2px; background: var(--idle); transition: background .3s, transform .3s; }
+.big { font: 600 2.4rem/1 var(--mono); font-variant-numeric: tabular-nums; }
+.unit { font: .85rem var(--mono); color: var(--pencil); }
+.two { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+@media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+.stat { display: flex; flex-direction: column; gap: 4px; padding: 10px 0; border-bottom: 1.5px dashed var(--rule); }
+
+/* experiments */
+.q { font: 600 1.1rem var(--sans); }
+.choices { display: flex; flex-direction: column; gap: 8px; }
+.choices .btn { text-align: left; box-shadow: none; }
+.choices .btn:hover { transform: none; background: var(--paper); }
+.choices .btn.right { background: var(--green); color: var(--card); border-color: var(--green); }
+.choices .btn.wrong { text-decoration: line-through; text-decoration-color: var(--red); text-decoration-thickness: 2px; }
+.reveal { display: flex; flex-direction: column; gap: 12px; }
+.verdict { font: 700 1.4rem var(--hand); }
+.bars { display: flex; flex-direction: column; gap: 8px; }
+.bar { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr) 5.5rem; gap: 10px; align-items: center; font-size: .9rem; }
+.bar .t { height: 18px; background: var(--rule); border-radius: 0 3px 3px 0; position: relative; overflow: hidden; }
+.bar .f { position: absolute; inset: 0 auto 0 0; background: var(--ink); border-radius: 0 3px 3px 0; transition: width .8s; }
+.bar.changed .f { background: var(--blue); }
+.bar .v { font: 600 .88rem var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .bar { grid-template-columns: minmax(0, 1fr) 5rem; } .bar .t { grid-column: 1 / -1; grid-row: 2; } }
+
+.lab-out { display: flex; flex-direction: column; gap: 10px; }
+.gpus { display: flex; flex-wrap: wrap; gap: 6px; }
+.gpu { border: 1.5px solid var(--ink); border-radius: 4px; padding: 4px 8px; font: .78rem var(--mono); background: var(--paper); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font: .8rem var(--mono); color: var(--pencil); }
+.legend i { display: inline-block; width: 11px; height: 11px; margin-right: 5px; vertical-align: -1px; border-radius: 2px; }
+.end ul { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: 6px; max-width: 66ch; }
+footer { font: .85rem var(--mono); color: var(--pencil); display: flex; flex-direction: column; gap: 6px; }
+.linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--blue); text-decoration: underline; cursor: pointer; }
+@media (prefers-reduced-motion: reduce) { .grid i, .bar .f { transition: none; } .btn:hover, .btn:active { transform: none; } }
+</style>
+</head>
+<body>
+
+<nav class="path" aria-label="Journey progress">
+  <div class="path-in">
+    <div class="stops" id="stops"></div>
+    <div class="xp" aria-live="polite">XP <b id="xp">0</b></div>
+  </div>
+</nav>
+
+<main class="wrap">
+  <header class="cover">
+    <h1>Inside a <mark>Mixture of Experts</mark></h1>
+    <p class="scribble">A short journey through the model we measured, DeepSeek V4.1 Flash. First you meet its experts, then you spread them over GPUs, then you run our experiments yourself. Guess before you look.</p>
+    <p class="who">Fay Elhassan &amp; Paul Misterka · CS471, EPFL · all numbers are from our runs</p>
+    <div class="row"><button class="btn go" id="start">Start the journey</button><button class="linkish" id="skip">Skip to the lab bench</button><button class="linkish" id="reset">Start over</button></div>
+  </header>
+  <div id="levels" style="display:flex;flex-direction:column;gap:56px"></div>
+  <footer>
+    <span>Code and data: github.com/squarerootminusone/llm-memory-connectivity</span>
+    <span>Hardware: 4–8× H200 on Modal; 4× H100 per node on Kuma (EPFL). Stock vLLM. Mostly single runs; final results may move these numbers a little.</span>
+  </footer>
+</main>
+
+<script>
+(() => {
+const NS = "http://www.w3.org/2000/svg";
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const svgEl = (tag, a = {}, p) => { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; };
+const h = (tag, a = {}, html = "") => { const e = document.createElement(tag); for (const k in a) e.setAttribute(k, a[k]); e.innerHTML = html; return e; };
+const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const wait = ms => new Promise(r => setTimeout(r, reduce ? 0 : ms));
+function rng(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+const store = { get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+                set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+
+/* ---------------- journey state ---------------- */
+const LEVELS = [];          // {id, title, build(section, done)}
+let S = store.get("moe-journey") || { at: 0, xp: 0, answers: {} };
+const save = () => store.set("moe-journey", S);
+
+function renderStops() {
+  const box = $("stops"); box.innerHTML = "";
+  LEVELS.forEach((L, i) => {
+    const b = h("button", { class: "stop" + (i < S.at ? " done" : i === S.at ? " here" : ""), title: L.title, "aria-label": `Level ${i + 1}: ${L.title}` }, String(i + 1));
+    if (i <= S.at) b.onclick = () => document.getElementById("lv-" + i).scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
+    box.appendChild(b);
+  });
+  $("xp").textContent = S.xp;
+}
+function addXP(n) { S.xp += n; save(); renderStops(); }
+function finish(i) {
+  if (S.at === i) { S.at = i + 1; save(); renderStops(); renderLevel(i + 1); }
+  const btn = document.querySelector(`#lv-${i} .next`); if (btn) btn.disabled = false;
+}
+function renderLevel(i) {
+  const sec = $("lv-" + i); if (!sec) return;
+  sec.innerHTML = "";
+  const L = LEVELS[i];
+  sec.appendChild(h("div", { class: "lv" }, `<span class="tag">LEVEL ${i + 1}</span><h2>${L.title}</h2>`));
+  if (i > S.at) { sec.appendChild(h("div", { class: "locked" }, "Locked. Finish the level above to open this one.")); return; }
+  L.build(sec, () => finish(i));
+  if (i < LEVELS.length - 1) {
+    const nb = h("button", { class: "btn go next" }, "Next level →");
+    nb.disabled = S.at <= i;
+    nb.onclick = () => $("lv-" + (i + 1)).scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
+    sec.appendChild(nb);
+  }
+}
+function taskLine(sec, text) { const t = h("div", { class: "task" }, "☐ " + text); sec.appendChild(t);
+  return { done() { t.className = "task ok"; t.textContent = "☑ " + text; } }; }
+
+/* ---------------- level 1: meet the experts ---------------- */
+LEVELS.push({ title: "Meet the experts", build(sec, done) {
+  sec.appendChild(h("p", {}, "A normal model sends every word through the same big block of weights. A mixture-of-experts model splits that block into many small <b>experts</b>. DeepSeek V4.1 Flash has <b>384 experts in each of its 40 layers</b>. For every token, a small <b>router</b> picks the 6 experts it thinks fit best, plus one shared expert that every token uses."));
+  const sheet = h("div", { class: "sheet" }); sec.appendChild(sheet);
+  const fig = h("div", { class: "fig" }); sheet.appendChild(fig);
+  const svg = svgEl("svg", { viewBox: "0 0 900 370", role: "img", "aria-label": "A token, the router and the 384 experts of one layer" }, fig);
+  const GX = 320, GY = 22, C = 24, R = 16, cw = 22, ch = 19, gap = 2;
+  const cells = [];
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++)
+    cells.push(svgEl("rect", { x: GX + c * (cw + gap), y: GY + r * (ch + gap), width: cw, height: ch, rx: 2, fill: css("--idle") }, svg));
+  const lab = svgEl("text", { x: GX, y: 362 }, svg); lab.textContent = "384 experts in one layer (you will meet 40 such layers)";
+  const tok = svgEl("g", {}, svg);
+  svgEl("rect", { x: 14, y: 160, width: 120, height: 44, rx: 22, fill: css("--marker"), stroke: css("--ink"), "stroke-width": 1.5 }, tok);
+  const tokT = svgEl("text", { x: 74, y: 188, "text-anchor": "middle", style: `fill:${css("--ink")};font-size:15px;font-weight:600` }, tok);
+  tokT.textContent = "“cache”";
+  svgEl("line", { x1: 134, y1: 182, x2: 196, y2: 182, stroke: css("--ink"), "stroke-width": 1.5 }, svg);
+  svgEl("circle", { cx: 236, cy: 182, r: 38, fill: css("--card"), stroke: css("--ink"), "stroke-width": 1.5 }, svg);
+  const rt = svgEl("text", { x: 236, y: 186, "text-anchor": "middle", style: `fill:${css("--ink")};font-size:13px` }, svg); rt.textContent = "router";
+  svgEl("rect", { x: 186, y: 286, width: 100, height: 40, rx: 4, fill: css("--blue-soft"), stroke: css("--ink"), "stroke-width": 1.5 }, svg);
+  const sh = svgEl("text", { x: 236, y: 311, "text-anchor": "middle", style: `fill:${css("--ink")};font-size:12px` }, svg); sh.textContent = "shared expert";
+  svgEl("line", { x1: 236, y1: 220, x2: 236, y2: 286, stroke: css("--ink"), "stroke-width": 1.5, "stroke-dasharray": "4 3" }, svg);
+  const wires = svgEl("g", {}, svg);
+  const hand = svgEl("text", { x: 20, y: 120, class: "hand" }, svg); hand.textContent = "press “Send a token”";
+  const words = ["“cache”", "“Paris”", "“def”", "“because”", "“1729”", "“attention”", "“the”", "“GPU”"];
+  let sent = 0, busy = false;
+  const row = h("div", { class: "row" }); sheet.appendChild(row);
+  const b = h("button", { class: "btn go" }, "Send a token"); row.appendChild(b);
+  const counter = h("span", { class: "unit" }, "experts used so far: 0 of 384"); row.appendChild(counter);
+  const used = new Set(); const r = rng(11);
+  const t = taskLine(sec, "Send 3 different tokens through the router");
+  b.onclick = async () => {
+    if (busy) return; busy = true;
+    tokT.textContent = words[sent % words.length];
+    cells.forEach((c, i) => c.setAttribute("fill", used.has(i) ? css("--blue-soft") : css("--idle")));
+    wires.innerHTML = "";
+    const pick = new Set(); while (pick.size < 6) pick.add(Math.floor(r() * 384));
+    for (const i of pick) {
+      const c = cells[i], x = +c.getAttribute("x") + cw / 2, y = +c.getAttribute("y") + ch / 2;
+      svgEl("line", { x1: 274, y1: 182, x2: x, y2: y, stroke: css("--blue"), "stroke-width": 1.5 }, wires);
+      c.setAttribute("fill", css("--blue")); used.add(i);
+      await wait(120);
+    }
+    sent++; counter.textContent = `experts used so far: ${used.size} of 384`;
+    hand.textContent = sent === 1 ? "only 6 of 384 woke up!" : sent === 2 ? "a different word, different experts" : "each token uses ~2% of the experts";
+    if (sent === 3) { t.done(); addXP(50); done(); }
+    busy = false;
+  };
+  sec.appendChild(h("p", { class: "note" }, "So each token only does a little math, but all 384 experts have to be stored somewhere, and someone has to fetch the right 6 every time."));
+} });
+
+/* ---------------- level 2: a crowd of tokens ---------------- */
+LEVELS.push({ title: "A crowd of tokens", build(sec, done) {
+  sec.appendChild(h("p", {}, "A server never handles one token at a time. Here is a batch of 32 tokens going through one layer. Which experts get work depends on what people actually type. Try both prompt sets."));
+  const sheet = h("div", { class: "sheet" }); sec.appendChild(sheet);
+  const row = h("div", { class: "row" }); sheet.appendChild(row);
+  const bu = h("button", { class: "btn", "aria-pressed": "false" }, "Benchmark filler (same word repeated)");
+  const bd = h("button", { class: "btn", "aria-pressed": "false" }, "Real, varied prompts");
+  row.append(bu, bd);
+  const two = h("div", { class: "two" }); sheet.appendChild(two);
+  const grid = h("div", { class: "grid", style: "grid-template-columns:repeat(32,minmax(0,1fr))", "aria-label": "384 experts" }); two.appendChild(grid);
+  const cells = []; for (let i = 0; i < 384; i++) { const c = h("i"); grid.appendChild(c); cells.push(c); }
+  const side = h("div", {}); two.appendChild(side);
+  side.innerHTML = `<div class="stat"><span class="big" id="l2n">–</span><span class="unit">different experts used in this layer</span></div><p class="note" id="l2t">Pick a prompt set.</p>`;
+  const tried = new Set(); const t = taskLine(sec, "Try both prompt sets");
+  const order = (() => { const r = rng(5), a = [...Array(384).keys()]; for (let i = 383; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; })();
+  const run = async kind => {
+    bu.setAttribute("aria-pressed", String(kind === "u")); bd.setAttribute("aria-pressed", String(kind === "d"));
+    cells.forEach(c => { c.style.background = ""; c.style.transform = ""; });
+    const n = kind === "u" ? 11 : 122;
+    $("l2n").textContent = n;
+    const list = order.slice(0, n);
+    for (let k = 0; k < list.length; k++) {
+      const c = cells[list[k]];
+      c.style.background = kind === "u" ? css("--red") : css("--blue");
+      if (kind === "u") c.style.transform = "scale(1.25)";
+      if (k % (kind === "u" ? 1 : 8) === 0) await wait(kind === "u" ? 90 : 25);
+    }
+    $("l2t").textContent = kind === "u"
+      ? "With filler text every token picks the same ~11 experts. Those few are swamped and the rest sit idle. Most benchmarks use prompts like this."
+      : "Real prompts spread out over ~122 experts. More weights have to be read, so each step gets heavier. In our runs TPOT went up 18–29%.";
+    tried.add(kind);
+    if (tried.size === 2) { t.done(); addXP(50); done(); }
+  };
+  bu.onclick = () => run("u"); bd.onclick = () => run("d");
+  sec.appendChild(h("p", { class: "note" }, "This is one of our findings: if you test with filler text you measure a much easier job than real users give the server."));
+} });
+
+/* ---------------- level 3: split across GPUs ---------------- */
+LEVELS.push({ title: "Too big for one GPU", build(sec, done) {
+  sec.appendChild(h("p", {}, "We spread the model over 4 GPUs. There are two basic ways to do it, and they need very different teamwork."));
+  sec.appendChild(h("p", {}, "<b>Tensor parallel (TP4):</b> each GPU keeps a quarter of <i>every</i> expert. All four work on every token, then add their partial results together (an <b>all-reduce</b>).<br><b>Expert parallel (EP4):</b> each GPU keeps 96 <i>whole</i> experts. A token is sent to whichever GPUs own its 6 experts (an <b>exchange</b>)."));
+  const sheet = h("div", { class: "sheet" }); sec.appendChild(sheet);
+  const row = h("div", { class: "row" }); sheet.appendChild(row);
+  const bt = h("button", { class: "btn", "aria-pressed": "false" }, "Run one layer with TP4");
+  const be = h("button", { class: "btn", "aria-pressed": "false" }, "Run one layer with EP4 (1 user)");
+  row.append(bt, be);
+  const fig = h("div", { class: "fig" }); sheet.appendChild(fig);
+  const svg = svgEl("svg", { viewBox: "0 0 900 360", role: "img", "aria-label": "Four GPUs and how one layer runs on them" }, fig);
+  sheet.appendChild(h("div", { class: "legend" }, `<span><i style="background:var(--ink)"></i>computing</span><span><i style="background:var(--idle)"></i>empty batch</span><span><i style="background:var(--red)"></i>talking (data moving)</span><span><i style="background:var(--wait)"></i>waiting for others</span>`));
+  const msg = h("p", { class: "note" }, "Pick a layout to run."); sheet.appendChild(msg);
+  const tried = new Set(); const t = taskLine(sec, "Run the layer both ways");
+  const draw = async mode => {
+    bt.setAttribute("aria-pressed", String(mode === "tp")); be.setAttribute("aria-pressed", String(mode === "ep"));
+    svg.innerHTML = "";
+    const W = 200, gap = 20, X0 = 20;
+    for (let g = 0; g < 4; g++) {
+      const x = X0 + g * (W + gap);
+      svgEl("rect", { x, y: 10, width: W, height: 150, rx: 6, fill: css("--card"), stroke: css("--ink"), "stroke-width": 1.5 }, svg);
+      const tt = svgEl("text", { x: x + 10, y: 30, style: `fill:${css("--ink")};font-weight:600` }, svg); tt.textContent = "GPU " + g;
+      // experts held
+      for (let k = 0; k < 96; k++) {
+        const cx = x + 10 + (k % 16) * 11.3, cy = 42 + Math.floor(k / 16) * 15;
+        if (mode === "tp") { svgEl("rect", { x: cx, y: cy, width: 9, height: 12, rx: 1, fill: css("--idle") }, svg);
+          svgEl("rect", { x: cx, y: cy + 9 - (g * 3) , width: 9, height: 3, fill: css("--blue") }, svg); }
+        else svgEl("rect", { x: cx, y: cy, width: 9, height: 12, rx: 1, fill: css("--blue") }, svg);
+      }
+      const cap = svgEl("text", { x: x + 10, y: 148 }, svg);
+      cap.textContent = mode === "tp" ? "¼ of all 384 experts" : `experts ${g * 96}–${g * 96 + 95}`;
+    }
+    // timeline lanes
+    const TL = 200, LH = 26;
+    const lab = svgEl("text", { x: 20, y: 190 }, svg); lab.textContent = "one layer, as time passes →";
+    const lanes = [];
+    for (let g = 0; g < 4; g++) {
+      const y = TL + g * (LH + 8);
+      const l = svgEl("text", { x: 20, y: y + 17 }, svg); l.textContent = "GPU " + g;
+      svgEl("rect", { x: 80, y, width: 800, height: LH, fill: css("--paper") }, svg);
+      lanes.push(y);
+    }
+    const seg = (g, x0, x1, color) => svgEl("rect", { x: 80 + x0, y: lanes[g], width: Math.max(1, x1 - x0), height: LH, fill: color }, svg);
+    if (mode === "tp") {
+      msg.textContent = "Everyone computes a slice of all 6 experts, then a short all-reduce. Little time is lost to waiting, but this happens for every one of the 40 layers, as ~34 small kernels each.";
+      for (let s = 0; s < 6; s++) { for (let g = 0; g < 4; g++) seg(g, s * 100, s * 100 + 90 + (g % 2) * 4, css("--ink")); await wait(140); }
+      for (let g = 0; g < 4; g++) seg(g, 600 + (g % 2) * 4, 640, css("--wait"));
+      await wait(150);
+      for (let g = 0; g < 4; g++) seg(g, 640, 700, css("--red"));
+    } else {
+      msg.textContent = "With one user, only GPU 3 has real work. The other three run empty batches so they can join the exchange, then wait for GPU 3. In our traces, waiting was 5–9× the actual data moving.";
+      for (let g = 0; g < 3; g++) seg(g, 0, 120, css("--idle"));
+      for (let s = 0; s < 6; s++) { seg(3, s * 110, s * 110 + 100, css("--ink")); await wait(140); }
+      for (let g = 0; g < 3; g++) seg(g, 120, 660, css("--wait"));
+      await wait(150);
+      for (let g = 0; g < 4; g++) seg(g, 660, 760, css("--red"));
+    }
+    tried.add(mode); if (tried.size === 2) { t.done(); addXP(50); done(); }
+  };
+  bt.onclick = () => draw("tp"); be.onclick = () => draw("ep");
+} });
+
+/* ---------------- level 4: lab bench ---------------- */
+const MEAS = {
+  "4|tp4|real": { 1: 7.38, 8: 9.64, 32: 18.95 }, "4|tp4|filler": { 1: 7.2, 32: 14.7 },
+  "4|tp4|real|spec": { 1: 2.79, 8: 6.40, 32: 12.89 },
+  "4|ep4|real": { 1: 11.3 }, "4|ep4|filler": { 1: 11.3 }, "4|ep4a2a|real": { 1: 10.3 }, "4|ep4a2a|filler": { 1: 10.3 },
+  "8|tp8|real": { 1: 6.97, 8: 8.68, 32: 15.77 }, "8|tp8|filler": { 1: 7.9, 8: 7.9, 32: 11.9 },
+  "8|dp2tp4|filler": { 1: 11.6, 8: 11.6, 32: 15.8 }, "8|dp8|filler": { 1: 15.4, 8: 17.7, 32: 19.1 } };
+const TWEAK = { graphs: [13.68, "CUDA graphs off"], nccl: [1.28, "NCCL all-reduce"], host: [1.449, "host-memory path"] };
+const BRK = { tp: [71.2, 21.8, 3.6, 3.2], tp8: [59.5, 29.8, 4.4, 6.3], ep: [61.1, 22.3, 6.3, 10.3], a2a: [61.2, 21.2, 5.1, 12.4] }; // compute, other, transfer, wait
+LEVELS.push({ title: "Your lab bench", build(sec, done) {
+  sec.appendChild(h("p", {}, "Now build a setup yourself. Every combination we actually ran gives a real measured time per token (TPOT). Combinations we didn't run say so. Try at least three setups."));
+  const sheet = h("div", { class: "sheet" }); sec.appendChild(sheet);
+  const st = { gpus: 4, layout: "tp4", users: 1, prompts: "real", spec: false, tweak: "none" };
+  const ctlBox = h("div", { class: "row", style: "align-items:flex-start;gap:16px 24px" }); sheet.appendChild(ctlBox);
+  const out = h("div", { class: "lab-out" }); sheet.appendChild(out);
+  const tried = new Set(); const t = taskLine(sec, "Measure 3 different setups");
+  const seg = (label, key, opts) => { const c = h("div", { class: "ctl" }, `<span>${label}</span>`); const s = h("div", { class: "seg" });
+    opts.forEach(([v, txt]) => { const b = h("button", { class: "btn", "aria-pressed": String(st[key] === v) }, txt);
+      b.onclick = () => { st[key] = v; if (key === "gpus") st.layout = v === 4 ? "tp4" : "tp8"; if (key !== "tweak" && key !== "spec") {} build(); }; s.appendChild(b); });
+    c.appendChild(s); return c; };
+  function build() {
+    ctlBox.innerHTML = "";
+    ctlBox.appendChild(seg("GPUs", "gpus", [[4, "4 × H200"], [8, "8 × H200"]]));
+    ctlBox.appendChild(seg("Layout", "layout", st.gpus === 4
+      ? [["tp4", "TP4"], ["ep4", "DP4+EP4"], ["ep4a2a", "DP4+EP4, all-to-all"]]
+      : [["tp8", "TP8"], ["dp2tp4", "2 × TP4 + EP8"], ["dp8", "DP8+EP8"]]));
+    ctlBox.appendChild(seg("Users", "users", [[1, "1"], [8, "8"], [32, "32"]]));
+    ctlBox.appendChild(seg("Prompts", "prompts", [["real", "real"], ["filler", "filler"]]));
+    ctlBox.appendChild(seg("Speculation", "spec", [[false, "off"], [true, "on"]]));
+    ctlBox.appendChild(seg("Ablation", "tweak", [["none", "none"], ["graphs", "graphs off"], ["nccl", "NCCL"], ["host", "host memory"]]));
+    show();
+  }
+  function lookup() {
+    const key = `${st.gpus}|${st.layout}|${st.prompts}` + (st.spec ? "|spec" : "");
+    let v = (MEAS[key] || {})[st.users];
+    if (v == null) return null;
+    if (st.tweak !== "none") { if (key !== "4|tp4|real" || st.users !== 1) return null; v *= TWEAK[st.tweak][0]; }
+    return v;
+  }
+  function show() {
+    out.innerHTML = "";
+    const v = lookup();
+    const perGpu = st.layout.startsWith("tp") ? `¼ of every expert` : `${384 / st.gpus} whole experts`;
+    const gp = h("div", { class: "gpus" });
+    for (let g = 0; g < st.gpus; g++) gp.appendChild(h("span", { class: "gpu" }, `GPU ${g}: ${st.layout === "tp8" ? "⅛ of every expert" : st.layout === "dp2tp4" ? "¼ of 192 experts" : perGpu}`));
+    out.appendChild(gp);
+    if (v == null) {
+      out.appendChild(h("p", { class: "note" }, "We didn't run this combination, so there is no number to show. Ablations were done on TP4 with real prompts at 1 user; DP+EP was measured at 1 user; the 8-GPU expert layouts with filler prompts."));
+      return;
+    }
+    const tps = Math.round(1000 * st.users / v);
+    out.appendChild(h("div", { class: "row", style: "gap:28px" },
+      `<div><div class="big">${v.toFixed(1)}</div><div class="unit">ms per token (TPOT)</div></div><div><div class="big">${tps.toLocaleString("en-US")}</div><div class="unit">tokens/s, all users</div></div>`));
+    // trace sketch
+    const fig = h("div", { class: "fig" }); out.appendChild(fig);
+    const lanes = Math.min(st.gpus, 8), LH = 16, H = 20 + lanes * (LH + 5);
+    const svg = svgEl("svg", { viewBox: `0 0 900 ${H}`, role: "img", "aria-label": "Sketch of one decode step" }, fig);
+    const kind = st.layout === "tp4" ? "tp" : st.layout === "tp8" ? "tp8" : st.layout === "ep4a2a" ? "a2a" : "ep";
+    const b = BRK[kind], tot = b.reduce((x, y) => x + y, 0);
+    const len = Math.min(800, 800 * Math.min(v, 25) / 25), L = 3;
+    const lt = svgEl("text", { x: 80, y: 12 }, svg); lt.textContent = v > 25 ? `one step (${v.toFixed(0)} ms, cut off at 25 ms) →` : `one step, drawn to scale (25 ms = full width) →`;
+    for (let g = 0; g < lanes; g++) {
+      const y = 18 + g * (LH + 5);
+      const tx = svgEl("text", { x: 4, y: y + 12 }, svg); tx.textContent = "GPU " + g;
+      for (let l = 0; l < L; l++) {
+        const x0 = 80 + l * len / L, w = len / L;
+        const dummy = kind !== "tp" && kind !== "tp8" && st.users === 1 && g !== lanes - 1;
+        const comp = (b[0] + b[1]) / tot * w, tr = b[2] / tot * w, wt = b[3] / tot * w;
+        const cw = dummy ? comp * 0.3 : comp;
+        svgEl("rect", { x: x0, y, width: cw, height: LH, fill: dummy ? css("--idle") : css("--ink") }, svg);
+        svgEl("rect", { x: x0 + cw, y, width: comp - cw + wt, height: LH, fill: css("--wait") }, svg);
+        svgEl("rect", { x: x0 + comp + wt, y, width: Math.max(1.5, tr), height: LH, fill: css("--red") }, svg);
+      }
+    }
+    out.appendChild(h("div", { class: "legend" }, `<span><i style="background:var(--ink)"></i>computing</span><span><i style="background:var(--idle)"></i>empty batch</span><span><i style="background:var(--wait)"></i>waiting</span><span><i style="background:var(--red)"></i>data moving</span><span>(sketch of 3 of 40 layers; shares from our traces)</span>`));
+    tried.add(JSON.stringify(st));
+    if (tried.size === 3) { t.done(); addXP(80); done(); }
+  }
+  build();
+} });
+
+/* ---------------- experiment levels ---------------- */
+const EXP = [
+  { title: "Double the GPUs", setup: "TP4 → TP8 on H200, 1 user. Each GPU now holds half as much of every expert.",
+    q: "What happens to the time per token?", opts: ["About 2× faster", "Only a little faster", "Slower"], ok: 1,
+    bars: [["TP4 (4 GPUs)", 7.38], ["TP8 (8 GPUs)", 6.97]], unit: "ms",
+    why: "Only 1.06× faster. Most of the 7 ms step is a fixed cost: about 1,350 small kernels that run one after another, plus 40 all-reduces. More GPUs don't make that chain shorter." },
+  { title: "Starve the bandwidth", setup: "We forced the all-reduce through host memory, which has about 17× less bandwidth than NVLink.",
+    q: "How much slower does decode get?", opts: ["About 17× slower", "About 1.5× slower", "No change"], ok: 1,
+    bars: [["NVLink (baseline)", 7.38], ["host memory, 17× less bandwidth", 10.69]], unit: "ms",
+    why: "Only 1.45× slower. The messages are tiny (a few KB per layer), so how fast the link is matters much less than the fixed delay of each message." },
+  { title: "Turn off CUDA graphs", setup: "CUDA graphs let the GPU replay a recorded step. Without them, the CPU launches every kernel one by one.",
+    q: "What do you expect?", opts: ["Barely matters", "About 2× slower", "More than 10× slower"], ok: 2,
+    bars: [["graphs on", 7.38], ["graphs off", 100.96]], unit: "ms",
+    why: "13.7× slower. Launching ~1,350 kernels per token from the CPU costs far more than the math itself. Even with graphs on, a 7 ms fixed cost remains on the GPU side." },
+  { title: "Swap the all-reduce", setup: "vLLM uses its own small one-shot all-reduce. We replaced it with NCCL, the standard library.",
+    q: "NCCL is the industry standard. Faster or slower?", opts: ["Faster", "The same", "Slower"], ok: 2,
+    bars: [["custom one-shot", 7.38], ["NCCL", 9.45]], unit: "ms",
+    why: "1.28× slower. NCCL is built for big messages. For tiny decode messages its extra setup per call is what you pay for." },
+  { title: "Give experts their own GPUs", setup: "DP4+EP4: each GPU owns 96 whole experts and its own copy of attention. 1 user.",
+    q: "Compared with TP4?", opts: ["Faster, less data to move", "About the same", "Slower"], ok: 2,
+    bars: [["TP4", 7.38], ["DP4+EP4", 11.3]], unit: "ms",
+    why: "About 1.5× slower. Three GPUs run empty batches and then wait for the one GPU that has the user. 83% of the exchange time was waiting, not moving data." },
+  { title: "Move fewer bytes", setup: "Same DP4+EP4, but a true all-to-all instead of all-gather + reduce-scatter. About 18% fewer bytes.",
+    q: "How much does that help?", opts: ["A lot, maybe 2×", "About 10%", "It gets slower"], ok: 1,
+    bars: [["all-gather", 11.3], ["all-to-all", 10.3]], unit: "ms",
+    why: "Only 1.10× faster. Waiting grew to 90% of the exchange: moving data faster just means waiting longer for the slowest GPU." },
+  { title: "Guess ahead", setup: "Speculative decoding (DSpark) drafts 3 tokens per user and checks them all in one step. About 2.5 get accepted.",
+    q: "At 1 user, what happens to TPOT?", opts: ["Small gain", "About 2.6× faster", "Slower, it is extra work"], ok: 1,
+    bars: [["normal, 1 user", 7.38], ["speculative, 1 user", 2.79], ["normal, 32 users", 18.95], ["speculative, 32 users", 12.89]], unit: "ms",
+    why: "2.6× faster at 1 user, because one expensive step now produces ~3.5 tokens. At 32 users the gain shrinks to 1.5×: the batch already shares the fixed cost." },
+  { title: "Invite more users", setup: "TP4, from 1 user to 32 users at the same time.",
+    q: "What happens to each user's time per token?", opts: ["32× longer", "About 2.6× longer", "No change"], ok: 1,
+    bars: [["1 user", 7.38], ["32 users", 18.95]], unit: "ms",
+    why: "Only 2.6× longer for 32× more work, so total throughput goes from 135 to about 1,690 tokens/s. Batching shares the fixed cost of a step between users." },
+  { title: "Spread over nodes", setup: "Kuma, H100: one TP4 replica on 1 node, on 2 nodes (2 GPUs each) or on 4 nodes (1 GPU each). InfiniBand between nodes. 16 users, speculation on.",
+    q: "Which is true?", opts: ["4 nodes is clearly the worst", "2 and 4 nodes cost about the same", "No change, InfiniBand is fast"], ok: 1,
+    bars: [["1 node × 4 GPUs", 13.0], ["2 nodes × 2 GPUs", 18.3], ["4 nodes × 1 GPU", 19.6]], unit: "ms",
+    why: "Crossing nodes at all adds 5–7 ms here; how many nodes barely matters. That points to latency: each of the ~80 small all-reduces per step pays a network round trip." } ];
+EXP.forEach((E, k) => LEVELS.push({ title: `Experiment ${k + 1}: ${E.title}`, build(sec, done) {
+  sec.appendChild(h("p", {}, E.setup));
+  const sheet = h("div", { class: "sheet" }); sec.appendChild(sheet);
+  sheet.appendChild(h("div", { class: "q" }, E.q));
+  const ch = h("div", { class: "choices" }); sheet.appendChild(ch);
+  const rev = h("div", { class: "reveal" }); sheet.appendChild(rev);
+  const key = "e" + k;
+  const btns = E.opts.map((o, i) => { const b = h("button", { class: "btn" }, o); ch.appendChild(b); b.onclick = () => answer(i, true); return b; });
+  function answer(i, fresh) {
+    btns.forEach((b, j) => { b.disabled = true; if (j === E.ok) b.classList.add("right"); else if (j === i) b.classList.add("wrong"); });
+    const right = i === E.ok;
+    if (fresh) { S.answers[key] = i; addXP(right ? 100 : 40); }
+    rev.innerHTML = "";
+    rev.appendChild(h("div", { class: "verdict", style: `color:${right ? "var(--green)" : "var(--red)"}` }, right ? "Your intuition was right. +100" : "Not quite, most people guess that. +40 for trying"));
+    const bars = h("div", { class: "bars" }); rev.appendChild(bars);
+    const max = Math.max(...E.bars.map(b => b[1]));
+    const fills = [];
+    E.bars.forEach(([lab, v], j) => { const r = h("div", { class: "bar" + (j % 2 ? " changed" : "") },
+      `<span>${lab}</span><span class="t"><span class="f" style="width:0"></span></span><span class="v">${v.toFixed(1)} ${E.unit}</span>`);
+      bars.appendChild(r); fills.push([r.querySelector(".f"), v]); });
+    requestAnimationFrame(() => fills.forEach(([f, v]) => f.style.width = (100 * v / max) + "%"));
+    rev.appendChild(h("p", {}, E.why));
+    done();
+  }
+  if (S.answers[key] != null) answer(S.answers[key], false);
+} }));
+
+/* ---------------- end ---------------- */
+LEVELS.push({ title: "What you found", build(sec, done) {
+  const right = EXP.filter((E, k) => S.answers["e" + k] === E.ok).length;
+  const box = h("div", { class: "sheet end" }); sec.appendChild(box);
+  box.appendChild(h("div", { class: "verdict" }, `You guessed ${right} of ${EXP.length} experiments right · ${S.xp} XP`));
+  box.appendChild(h("p", {}, "Put together, the experiments tell one story: at small batch, a decode step is a long chain of tiny kernels and tiny messages. Its cost is mostly fixed delay, not bandwidth. Things that cut the number of steps (speculation, batching) help a lot; things that move bytes faster barely help."));
+  box.appendChild(h("p", {}, "<b>What that asks of hardware:</b>"));
+  box.appendChild(h("ul", {}, "<li>cheaper kernel launches, so fewer and larger kernels;</li><li>lower latency for small messages between GPUs;</li><li>keep a tensor-parallel group inside one NVLink domain;</li><li>enough memory to fit a replica in one node.</li>"));
+  box.appendChild(h("p", { class: "note" }, "Thanks for playing. The poster next to this has the full numbers."));
+  done();
+} });
+
+/* ---------------- boot ---------------- */
+const host = $("levels");
+LEVELS.forEach((L, i) => host.appendChild(h("section", { class: "level", id: "lv-" + i, "aria-label": L.title })));
+LEVELS.forEach((L, i) => renderLevel(i));
+renderStops();
+$("start").onclick = () => $("lv-" + Math.min(S.at, LEVELS.length - 1)).scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
+$("skip").onclick = () => { if (S.at < 3) { S.at = 3; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); } $("lv-3").scrollIntoView({ behavior: reduce ? "auto" : "smooth" }); };
+$("reset").onclick = () => { S = { at: 0, xp: 0, answers: {} }; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); window.scrollTo(0, 0); };
+})();
+</script>
+
+</body>
+</html>
