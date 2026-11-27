@@ -61,6 +61,11 @@ h2 { font: 700 clamp(1.6rem, 4vw, 2.3rem)/1.1 var(--cond); margin: 0; text-wrap:
 p { margin: 0; max-width: 66ch; }
 .note { font: 400 1.2rem/1.4 var(--hand); color: var(--blue); max-width: 60ch; }
 .sub { font: 700 1.35rem/1.2 var(--cond); margin: 10px 0 0; }
+.board { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.hyp { background: var(--card); border: 1.5px solid var(--ink); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 8px; position: relative; min-width: 0; }
+.hyp p { font-size: .95rem; }
+.hyp-id { font: 700 1.1rem var(--mono); }
+.stamp { align-self: flex-start; font: 700 1.15rem var(--hand); border: 2px solid; border-radius: 4px; padding: 0 10px; transform: rotate(-4deg); }
 .sheet { background: var(--card); border: 1.5px solid var(--ink); border-radius: 6px; padding: 18px; display: flex; flex-direction: column; gap: 14px;
   box-shadow: 4px 4px 0 var(--ink); min-width: 0; }
 .fig { width: 100%; overflow-x: auto; }
@@ -161,8 +166,9 @@ const store = { get(k) { try { return JSON.parse(localStorage.getItem(k)); } cat
 
 /* ---------------- journey state ---------------- */
 const LEVELS = [];          // {id, title, build(section, done)}
-let S = store.get("moe-journey-2") || { at: 0, xp: 0, answers: {} };
-const save = () => store.set("moe-journey-2", S);
+let S = store.get("moe-journey-3") || { at: 0, xp: 0, answers: {}, pred: {} };
+S.pred = S.pred || {};
+const save = () => store.set("moe-journey-3", S);
 
 function renderStops() {
   const box = $("stops"); box.innerHTML = "";
@@ -241,10 +247,60 @@ LEVELS.push({ title: "What are we looking at?", build(sec, done) {
   };
   bD.onclick = () => view("d"); bM.onclick = () => view("m");
 
-  sec.appendChild(h("h3", { class: "sub" }, "What we wanted to find out"));
-  sec.appendChild(h("p", {}, "DeepSeek V4.1 Flash is too big for one GPU, so it runs on 4 or 8 GPUs that have to cooperate on every single token. Our starting idea was that decode is limited by <b>memory bandwidth</b>, that is, how fast the GPUs can read the expert weights. So we measured where the time per token really goes: computing, moving data between GPUs, or <b>waiting</b> for each other."));
-  sec.appendChild(h("p", { class: "note" }, "On this journey you will meet the experts, split them over GPUs, build setups on a lab bench, and then run our experiments one by one. Guess each result before you see it."));
+  sec.appendChild(h("h3", { class: "sub" }, "Why this matters"));
+  sec.appendChild(h("p", {}, "Many of today's open models, DeepSeek included, are mixtures of experts, and they are too big for one GPU. DeepSeek V4.1 Flash runs on 4 or 8 GPUs that have to cooperate on every single token. How fast and how cheaply it answers depends on what slows each token down. If it is <b>memory bandwidth</b>, you want GPUs with faster memory. If it is the <b>links between GPUs</b>, you want a better network. If it is GPUs <b>waiting</b> for each other or many tiny overheads, neither of those helps. Buying the wrong fix is expensive."));
+  sec.appendChild(h("h3", { class: "sub" }, "Our question"));
+  sec.appendChild(h("p", { class: "note", style: "font-size:1.35rem" }, "When does DeepSeek V4.1 Flash stop being limited by useful computation and start being limited by moving data, communication between GPUs, waiting, or overhead? And how does that change with the number of users and the way the model is split over GPUs?"));
+  sec.appendChild(h("h3", { class: "sub" }, "What we want to show"));
+  sec.appendChild(h("p", {}, "We started from the common idea that decode is limited by memory bandwidth, and wrote down six hypotheses to test. Our goal is a measured map of when computing, moving data, waiting and fixed delays each dominate, and one hardware claim we want to prove: <b>below about 20 tokens per step, the fixed delay of each step matters more than bandwidth</b>, so hardware for this kind of serving should be judged on latency. We measured on three machines: Modal (4–8 H200 GPUs, one node), Kuma at EPFL (H100, up to 4 nodes) and clariden at CSCS (GH200, 2 nodes)."));
+  sec.appendChild(h("p", { class: "note" }, "On this journey you will make your own predictions, meet the experts, split them over GPUs, build setups on a lab bench, and then run our experiments one by one. Each experiment stamps a verdict on one of our hypotheses."));
   const t = taskLine(sec, "Generate an answer and look at both model types");
+} });
+
+/* ---------------- level: hypothesis board ---------------- */
+const HYP = [
+  { id: "H1", text: "Decode at small batch is limited by memory bandwidth (how fast the expert weights are read).", v: "Refined",
+    why: "The expert GEMMs use only 7–29% of HBM bandwidth. A fixed cost per step (a long chain of tiny kernels) matters more." },
+  { id: "H2", text: "TP8 is not 2× faster than TP4 because the all-reduce between GPUs takes too long.", v: "Refuted",
+    why: "Communication is about 4% of the time. TP8 is only 1.06× faster because the fixed cost per step barely shrinks." },
+  { id: "H3", text: "Expert parallelism is slow because GPUs wait for each other, not because of how many bytes they move.", v: "Supported",
+    why: "62–71% of communication time is waiting. 17× less bandwidth only made it 1.45× slower; moving 18% fewer bytes helped ~10%." },
+  { id: "H4", text: "The best layout depends on load: tensor parallel at low load, expert parallel at high load.", v: "Open",
+    why: "TP4 is best for 1 user and TP8 for 64–256 users. Expert parallel has not overtaken TP yet; high-load EP runs come next." },
+  { id: "H5", text: "Across nodes, tensor parallel suffers from its many all-reduces, so expert parallel may win there.", v: "Open",
+    why: "Crossing nodes adds 4–6 ms per step, close to 80 all-reduces × ~55 µs. The direct TP vs. EP test across nodes is still to run." },
+  { id: "H6", text: "Longer conversations (more context) make each new token slower.", v: "Refuted",
+    why: "In the range we tested, TPOT stayed near 7.2 ms. The compressed KV cache seems too small to matter yet." } ];
+const VCOL = { Supported: "var(--green)", Refuted: "var(--red)", Refined: "var(--blue)", Open: "var(--pencil)" };
+const hypTested = id => EXP.some((E, k) => E.hyp === id && S.answers["e" + k] != null);
+function hypCard(H, showAll) {
+  const c = h("div", { class: "hyp" });
+  const pred = S.pred[H.id];
+  const shown = showAll || hypTested(H.id);
+  c.innerHTML = `<div class="hyp-id">${H.id}</div><p>${H.text}</p>` +
+    (pred ? `<div class="unit">your guess: <b>${pred === "t" ? "likely true" : "likely false"}</b></div>` : "") +
+    (shown ? `<div class="stamp" style="color:${VCOL[H.v]};border-color:${VCOL[H.v]}">${H.v}</div><p class="unit" style="font-family:var(--sans);font-size:.88rem">${H.why}</p>` : "");
+  return c;
+}
+LEVELS.push({ title: "Our six hypotheses", build(sec, done) {
+  sec.appendChild(h("p", {}, "Before running anything, we wrote these down in our proposal. Make your own call on each one. Later levels will stamp each card with what we found: <b>Supported</b>, <b>Refuted</b>, <b>Refined</b> (partly right, restated) or <b>Open</b> (not settled yet)."));
+  const board = h("div", { class: "board" }); sec.appendChild(board);
+  const t = taskLine(sec, "Make a guess on all six hypotheses");
+  const draw = () => {
+    board.innerHTML = "";
+    HYP.forEach(H => {
+      const c = hypCard(H, false);
+      if (!S.pred[H.id]) {
+        const r = h("div", { class: "row" });
+        [["t", "Likely true"], ["f", "Likely false"]].forEach(([v, txt]) => { const b = h("button", { class: "btn" }, txt);
+          b.onclick = () => { S.pred[H.id] = v; addXP(10); draw(); }; r.appendChild(b); });
+        c.appendChild(r);
+      }
+      board.appendChild(c);
+    });
+    if (HYP.every(H => S.pred[H.id])) { t.done(); done(); }
+  };
+  draw();
 } });
 
 /* ---------------- level 1: meet the experts ---------------- */
@@ -479,39 +535,47 @@ LEVELS.push({ title: "Your lab bench", build(sec, done) {
 
 /* ---------------- experiment levels ---------------- */
 const EXP = [
-  { title: "Double the GPUs", setup: "TP4 → TP8 on H200, 1 user. Each GPU now holds half as much of every expert.",
+  { title: "Double the GPUs", hyp: "H2", setup: "TP4 → TP8 on H200, 1 user. Each GPU now holds half as much of every expert.",
     q: "What happens to the time per token?", opts: ["About 2× faster", "Only a little faster", "Slower"], ok: 1,
     bars: [["TP4 (4 GPUs)", 7.38], ["TP8 (8 GPUs)", 6.97]], unit: "ms",
     why: "Only 1.06× faster. Most of the 7 ms step is a fixed cost: about 1,350 small kernels that run one after another, plus 40 all-reduces. More GPUs don't make that chain shorter." },
-  { title: "Starve the bandwidth", setup: "We forced the all-reduce through host memory, which has about 17× less bandwidth than NVLink.",
+  { title: "Starve the bandwidth", hyp: "H1", setup: "We forced the all-reduce through host memory, which has about 17× less bandwidth than NVLink.",
     q: "How much slower does decode get?", opts: ["About 17× slower", "About 1.5× slower", "No change"], ok: 1,
     bars: [["NVLink (baseline)", 7.38], ["host memory, 17× less bandwidth", 10.69]], unit: "ms",
     why: "Only 1.45× slower. The messages are tiny (a few KB per layer), so how fast the link is matters much less than the fixed delay of each message." },
-  { title: "Turn off CUDA graphs", setup: "CUDA graphs let the GPU replay a recorded step. Without them, the CPU launches every kernel one by one.",
+  { title: "Turn off CUDA graphs", hyp: "H1", setup: "CUDA graphs let the GPU replay a recorded step. Without them, the CPU launches every kernel one by one.",
     q: "What do you expect?", opts: ["Barely matters", "About 2× slower", "More than 10× slower"], ok: 2,
     bars: [["graphs on", 7.38], ["graphs off", 100.96]], unit: "ms",
     why: "13.7× slower. Launching ~1,350 kernels per token from the CPU costs far more than the math itself. Even with graphs on, a 7 ms fixed cost remains on the GPU side." },
-  { title: "Swap the all-reduce", setup: "vLLM uses its own small one-shot all-reduce. We replaced it with NCCL, the standard library.",
+  { title: "Swap the all-reduce", hyp: "H1", setup: "vLLM uses its own small one-shot all-reduce. We replaced it with NCCL, the standard library.",
     q: "NCCL is the industry standard. Faster or slower?", opts: ["Faster", "The same", "Slower"], ok: 2,
     bars: [["custom one-shot", 7.38], ["NCCL", 9.45]], unit: "ms",
     why: "1.28× slower. NCCL is built for big messages. For tiny decode messages its extra setup per call is what you pay for." },
-  { title: "Give experts their own GPUs", setup: "DP4+EP4: each GPU owns 96 whole experts and its own copy of attention. 1 user.",
+  { title: "Give experts their own GPUs", hyp: "H3", setup: "DP4+EP4: each GPU owns 96 whole experts and its own copy of attention. 1 user.",
     q: "Compared with TP4?", opts: ["Faster, less data to move", "About the same", "Slower"], ok: 2,
     bars: [["TP4", 7.38], ["DP4+EP4", 11.3]], unit: "ms",
     why: "About 1.5× slower. Three GPUs run empty batches and then wait for the one GPU that has the user. 83% of the exchange time was waiting, not moving data." },
-  { title: "Move fewer bytes", setup: "Same DP4+EP4, but a true all-to-all instead of all-gather + reduce-scatter. About 18% fewer bytes.",
+  { title: "Move fewer bytes", hyp: "H3", setup: "Same DP4+EP4, but a true all-to-all instead of all-gather + reduce-scatter. About 18% fewer bytes.",
     q: "How much does that help?", opts: ["A lot, maybe 2×", "About 10%", "It gets slower"], ok: 1,
     bars: [["all-gather", 11.3], ["all-to-all", 10.3]], unit: "ms",
     why: "Only 1.10× faster. Waiting grew to 90% of the exchange: moving data faster just means waiting longer for the slowest GPU." },
-  { title: "Guess ahead", setup: "Speculative decoding (DSpark) drafts 3 tokens per user and checks them all in one step. About 2.5 get accepted.",
+  { title: "Guess ahead", hyp: "H1", setup: "Speculative decoding (DSpark) drafts 3 tokens per user and checks them all in one step. About 2.5 get accepted.",
     q: "At 1 user, what happens to TPOT?", opts: ["Small gain", "About 2.6× faster", "Slower, it is extra work"], ok: 1,
     bars: [["normal, 1 user", 7.38], ["speculative, 1 user", 2.79], ["normal, 32 users", 18.95], ["speculative, 32 users", 12.89]], unit: "ms",
     why: "2.6× faster at 1 user, because one expensive step now produces ~3.5 tokens. At 32 users the gain shrinks to 1.5×: the batch already shares the fixed cost." },
-  { title: "Invite more users", setup: "TP4, from 1 user to 32 users at the same time.",
+  { title: "Invite more users", hyp: "H4", setup: "TP4, from 1 user to 32 users at the same time.",
     q: "What happens to each user's time per token?", opts: ["32× longer", "About 2.6× longer", "No change"], ok: 1,
     bars: [["1 user", 7.38], ["32 users", 18.95]], unit: "ms",
     why: "Only 2.6× longer for 32× more work, so total throughput goes from 135 to about 1,690 tokens/s. Batching shares the fixed cost of a step between users." },
-  { title: "Spread over nodes", setup: "Kuma, H100: one TP4 replica on 1 node, on 2 nodes (2 GPUs each) or on 4 nodes (1 GPU each). InfiniBand between nodes. 16 users, speculation on.",
+  { title: "Crowd the server", hyp: "H4", setup: "TP4 against TP8 on H200, now with 256 users at once. Earlier, at 1 user, TP8 was only 1.06× faster.",
+    q: "With 256 users, how much more does TP8 serve per second?", opts: ["Still only about 6% more", "About 30% more", "TP4 serves more"], ok: 1,
+    bars: [["TP4, 256 users", 2574], ["TP8, 256 users", 3366]], unit: "tok/s",
+    why: "TP8 serves 1.31× more tokens per second. With many users the per-token work finally dominates, and that part does shrink with more GPUs. Whether expert parallel overtakes both at high load is still being tested." },
+  { title: "Make the conversation longer", hyp: "H6", setup: "Same TP4 setup, 1 user, but the conversation gets longer, so every new token has to look back at more context.",
+    q: "What happens to the time per token over the range we tested?", opts: ["It grows a lot", "It stays about the same", "It gets faster"], ok: 1,
+    bars: [["short context", 7.2], ["longest context we tested", 7.2]], unit: "ms",
+    why: "TPOT stayed near 7.2 ms. DeepSeek V4.1 Flash keeps a compressed KV cache, and reading it seems too small next to the fixed cost per step. Much longer contexts might change this." },
+  { title: "Spread over nodes", hyp: "H5", setup: "Kuma, H100: one TP4 replica on 1 node, on 2 nodes (2 GPUs each) or on 4 nodes (1 GPU each). InfiniBand between nodes. 16 users, speculation on.",
     q: "Which is true?", opts: ["4 nodes is clearly the worst", "2 and 4 nodes cost about the same", "No change, InfiniBand is fast"], ok: 1,
     bars: [["1 node × 4 GPUs", 13.0], ["2 nodes × 2 GPUs", 18.3], ["4 nodes × 1 GPU", 19.6]], unit: "ms",
     why: "Crossing nodes at all adds 5–7 ms here; how many nodes barely matters. That points to latency: each of the ~80 small all-reduces per step pays a network round trip." } ];
@@ -529,11 +593,13 @@ EXP.forEach((E, k) => LEVELS.push({ title: `Experiment ${k + 1}: ${E.title}`, bu
     if (fresh) { S.answers[key] = i; addXP(right ? 100 : 40); }
     rev.innerHTML = "";
     rev.appendChild(h("div", { class: "verdict", style: `color:${right ? "var(--green)" : "var(--red)"}` }, right ? "Your intuition was right. +100" : "Not quite, most people guess that. +40 for trying"));
+    const H = HYP.find(x => x.id === E.hyp);
+    rev.appendChild(h("div", { class: "row" }, `<span class="unit">This tests <b>${H.id}</b>: ${H.text}</span><span class="stamp" style="color:${VCOL[H.v]};border-color:${VCOL[H.v]}">${H.id}: ${H.v}</span>`));
     const bars = h("div", { class: "bars" }); rev.appendChild(bars);
     const max = Math.max(...E.bars.map(b => b[1]));
     const fills = [];
     E.bars.forEach(([lab, v], j) => { const r = h("div", { class: "bar" + (j % 2 ? " changed" : "") },
-      `<span>${lab}</span><span class="t"><span class="f" style="width:0"></span></span><span class="v">${v.toFixed(1)} ${E.unit}</span>`);
+      `<span>${lab}</span><span class="t"><span class="f" style="width:0"></span></span><span class="v">${E.unit === "tok/s" ? v.toLocaleString("en-US") : v.toFixed(1)} ${E.unit}</span>`);
       bars.appendChild(r); fills.push([r.querySelector(".f"), v]); });
     requestAnimationFrame(() => fills.forEach(([f, v]) => f.style.width = (100 * v / max) + "%"));
     rev.appendChild(h("p", {}, E.why));
@@ -543,13 +609,24 @@ EXP.forEach((E, k) => LEVELS.push({ title: `Experiment ${k + 1}: ${E.title}`, bu
 } }));
 
 /* ---------------- end ---------------- */
-LEVELS.push({ title: "What you found", build(sec, done) {
+LEVELS.push({ title: "Our question, our answer", build(sec, done) {
   const right = EXP.filter((E, k) => S.answers["e" + k] === E.ok).length;
   const box = h("div", { class: "sheet end" }); sec.appendChild(box);
   box.appendChild(h("div", { class: "verdict" }, `You guessed ${right} of ${EXP.length} experiments right · ${S.xp} XP`));
-  box.appendChild(h("p", {}, "Put together, the experiments tell one story: at small batch, a decode step is a long chain of tiny kernels and tiny messages. Its cost is mostly fixed delay, not bandwidth. Things that cut the number of steps (speculation, batching) help a lot; things that move bytes faster barely help."));
-  box.appendChild(h("p", {}, "<b>What that asks of hardware:</b>"));
-  box.appendChild(h("ul", {}, "<li>cheaper kernel launches, so fewer and larger kernels;</li><li>lower latency for small messages between GPUs;</li><li>keep a tensor-parallel group inside one NVLink domain;</li><li>enough memory to fit a replica in one node.</li>"));
+  box.appendChild(h("h3", { class: "sub" }, "The question"));
+  box.appendChild(h("p", {}, "When does DeepSeek V4.1 Flash stop being limited by useful computation, and start being limited by moving data, communication, waiting or overhead?"));
+  box.appendChild(h("h3", { class: "sub" }, "Our answer so far"));
+  box.appendChild(h("p", {}, "At small batch, a decode step is a long chain of tiny kernels and tiny messages. Its cost is mostly a <b>fixed delay per step</b> (about 7 ms), not bandwidth. With expert parallelism, most communication time is GPUs <b>waiting</b> for each other. Things that cut the number of steps (speculation, batching) help a lot; things that move bytes faster barely help. Below about 20 tokens per step this fixed delay dominates; above it, the per-token work takes over."));
+  box.appendChild(h("h3", { class: "sub" }, "The hypothesis board"));
+  const board = h("div", { class: "board" }); box.appendChild(board);
+  HYP.forEach(H => board.appendChild(hypCard(H, true)));
+  const scored = HYP.filter(H => ["Supported", "Refuted", "Refined"].includes(H.v) && S.pred[H.id]);
+  const hit = scored.filter(H => (S.pred[H.id] === "t") === (H.v === "Supported")).length;
+  if (scored.length) box.appendChild(h("p", { class: "note" }, `Your early calls matched ${hit} of the ${scored.length} hypotheses we could settle. (Refined counts as "not as stated".)`));
+  box.appendChild(h("h3", { class: "sub" }, "What we want to prove next"));
+  box.appendChild(h("p", {}, "Our hardware claim: <b>below about 20 tokens per step, judge hardware by its fixed latency per step, not its bandwidth.</b> For the final report we are running the open tests: expert parallel against tensor parallel at 64–256 users (H4), the direct cross-node comparison on Kuma and clariden (H5), and repeats of single-run points."));
+  box.appendChild(h("p", {}, "<b>If the claim holds, hardware for this kind of serving needs:</b>"));
+  box.appendChild(h("ul", {}, "<li>cheaper kernel launches, so fewer and larger kernels;</li><li>lower latency for small messages between GPUs;</li><li>tensor-parallel groups kept inside one NVLink domain;</li><li>enough memory to fit a replica in one node.</li>"));
   box.appendChild(h("p", { class: "note" }, "Thanks for playing. The poster next to this has the full numbers."));
   done();
 } });
@@ -560,8 +637,8 @@ LEVELS.forEach((L, i) => host.appendChild(h("section", { class: "level", id: "lv
 LEVELS.forEach((L, i) => renderLevel(i));
 renderStops();
 $("start").onclick = () => $("lv-" + Math.min(S.at, LEVELS.length - 1)).scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
-$("skip").onclick = () => { if (S.at < 4) { S.at = 4; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); } $("lv-4").scrollIntoView({ behavior: reduce ? "auto" : "smooth" }); };
-$("reset").onclick = () => { S = { at: 0, xp: 0, answers: {} }; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); window.scrollTo(0, 0); };
+$("skip").onclick = () => { const lab = LEVELS.findIndex(L => L.title === "Your lab bench"); if (S.at < lab) { S.at = lab; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); } $("lv-" + lab).scrollIntoView({ behavior: reduce ? "auto" : "smooth" }); };
+$("reset").onclick = () => { S = { at: 0, xp: 0, answers: {}, pred: {} }; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); window.scrollTo(0, 0); };
 })();
 </script>
 
