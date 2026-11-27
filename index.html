@@ -60,6 +60,7 @@ section.level { display: flex; flex-direction: column; gap: 18px; scroll-margin-
 h2 { font: 700 clamp(1.6rem, 4vw, 2.3rem)/1.1 var(--cond); margin: 0; text-wrap: balance; }
 p { margin: 0; max-width: 66ch; }
 .note { font: 400 1.2rem/1.4 var(--hand); color: var(--blue); max-width: 60ch; }
+.sub { font: 700 1.35rem/1.2 var(--cond); margin: 10px 0 0; }
 .sheet { background: var(--card); border: 1.5px solid var(--ink); border-radius: 6px; padding: 18px; display: flex; flex-direction: column; gap: 14px;
   box-shadow: 4px 4px 0 var(--ink); min-width: 0; }
 .fig { width: 100%; overflow-x: auto; }
@@ -160,8 +161,8 @@ const store = { get(k) { try { return JSON.parse(localStorage.getItem(k)); } cat
 
 /* ---------------- journey state ---------------- */
 const LEVELS = [];          // {id, title, build(section, done)}
-let S = store.get("moe-journey") || { at: 0, xp: 0, answers: {} };
-const save = () => store.set("moe-journey", S);
+let S = store.get("moe-journey-2") || { at: 0, xp: 0, answers: {} };
+const save = () => store.set("moe-journey-2", S);
 
 function renderStops() {
   const box = $("stops"); box.innerHTML = "";
@@ -193,6 +194,58 @@ function renderLevel(i) {
 }
 function taskLine(sec, text) { const t = h("div", { class: "task" }, "☐ " + text); sec.appendChild(t);
   return { done() { t.className = "task ok"; t.textContent = "☑ " + text; } }; }
+
+/* ---------------- level 0: the problem ---------------- */
+LEVELS.push({ title: "What are we looking at?", build(sec, done) {
+  sec.appendChild(h("p", {}, "When you chat with a large language model, it writes its answer one small piece at a time. These pieces are called <b>tokens</b> (a word or part of a word). Every new token needs one full pass through the whole model. This phase is called <b>decode</b>, and the time it takes per token, the <b>TPOT</b>, decides how fast the answer appears on your screen."));
+  const s1 = h("div", { class: "sheet" }); sec.appendChild(s1);
+  const out = h("p", { style: "font:1.15rem var(--mono);min-height:3.4em" }, "<span class='unit'>(the answer will appear here)</span>"); s1.appendChild(out);
+  const r1 = h("div", { class: "row" }); s1.appendChild(r1);
+  const gen = h("button", { class: "btn go" }, "Generate an answer"); r1.appendChild(gen);
+  const cnt = h("span", { class: "unit" }, ""); r1.appendChild(cnt);
+  s1.appendChild(h("p", { class: "note" }, "Slowed down 20× so you can see it. In reality each token took about 7 ms on 4 H200 GPUs, and behind each one the GPUs ran about 1,350 small jobs (kernels)."));
+  const words = ["A", " mixture", " of", " experts", " sends", " each", " token", " to", " only", " a", " few", " small", " sub", "-networks", ",", " so", " it", " can", " be", " huge", " yet", " cheap", " to", " run", "."];
+  let busy = false, didGen = false, views = new Set();
+  const check = () => { if (didGen && views.size === 2) { t.done(); addXP(30); done(); } };
+  gen.onclick = async () => {
+    if (busy) return; busy = true; out.textContent = "";
+    for (let i = 0; i < words.length; i++) {
+      out.textContent += words[i];
+      cnt.textContent = `${i + 1} tokens · ${(i + 1) * 40} layer passes · ~${((i + 1) * 1350).toLocaleString("en-US")} kernels`;
+      await wait(148);
+    }
+    busy = false; didGen = true; check();
+  };
+
+  sec.appendChild(h("h3", { class: "sub" }, "What is a mixture of experts?"));
+  sec.appendChild(h("p", {}, "A classic (<b>dense</b>) model uses all of its weights for every token. A <b>mixture of experts</b> (MoE) splits most of those weights into many small networks called <b>experts</b>. A tiny <b>router</b> looks at each token and wakes up only the few experts that suit it. Think of a hospital with hundreds of specialists: each patient only sees a handful of them. The model can know a lot, but each token only costs a little work."));
+  const s2 = h("div", { class: "sheet" }); sec.appendChild(s2);
+  const r2 = h("div", { class: "row" }); s2.appendChild(r2);
+  const bD = h("button", { class: "btn", "aria-pressed": "false" }, "Dense model");
+  const bM = h("button", { class: "btn", "aria-pressed": "false" }, "Mixture of experts");
+  r2.append(bD, bM);
+  const two = h("div", { class: "two" }); s2.appendChild(two);
+  const grid = h("div", { class: "grid", style: "grid-template-columns:repeat(32,minmax(0,1fr))" }); two.appendChild(grid);
+  const cells = []; for (let i = 0; i < 384; i++) { const c = h("i"); grid.appendChild(c); cells.push(c); }
+  const cap = h("p", { class: "note" }, "Pick one to see which weights work on a single token."); two.appendChild(cap);
+  const pick = [17, 58, 133, 201, 290, 347];
+  const view = k => {
+    bD.setAttribute("aria-pressed", String(k === "d")); bM.setAttribute("aria-pressed", String(k === "m"));
+    grid.style.gridTemplateColumns = k === "d" ? "repeat(1,minmax(0,1fr))" : "repeat(32,minmax(0,1fr))";
+    cells.forEach((c, i) => { c.style.display = k === "d" && i > 0 ? "none" : ""; c.style.aspectRatio = k === "d" ? "32 / 12" : "1";
+      c.style.background = k === "d" ? css("--ink") : pick.includes(i) ? css("--blue") : ""; });
+    cap.textContent = k === "d"
+      ? "Dense: one big block. All of it runs for every token."
+      : "MoE (DeepSeek V4.1 Flash): 384 experts per layer. The router wakes 6 of them, plus 1 shared expert, so about 2% of the expert weights work on this token.";
+    views.add(k); check();
+  };
+  bD.onclick = () => view("d"); bM.onclick = () => view("m");
+
+  sec.appendChild(h("h3", { class: "sub" }, "What we wanted to find out"));
+  sec.appendChild(h("p", {}, "DeepSeek V4.1 Flash is too big for one GPU, so it runs on 4 or 8 GPUs that have to cooperate on every single token. Our starting idea was that decode is limited by <b>memory bandwidth</b>, that is, how fast the GPUs can read the expert weights. So we measured where the time per token really goes: computing, moving data between GPUs, or <b>waiting</b> for each other."));
+  sec.appendChild(h("p", { class: "note" }, "On this journey you will meet the experts, split them over GPUs, build setups on a lab bench, and then run our experiments one by one. Guess each result before you see it."));
+  const t = taskLine(sec, "Generate an answer and look at both model types");
+} });
 
 /* ---------------- level 1: meet the experts ---------------- */
 LEVELS.push({ title: "Meet the experts", build(sec, done) {
@@ -507,7 +560,7 @@ LEVELS.forEach((L, i) => host.appendChild(h("section", { class: "level", id: "lv
 LEVELS.forEach((L, i) => renderLevel(i));
 renderStops();
 $("start").onclick = () => $("lv-" + Math.min(S.at, LEVELS.length - 1)).scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
-$("skip").onclick = () => { if (S.at < 3) { S.at = 3; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); } $("lv-3").scrollIntoView({ behavior: reduce ? "auto" : "smooth" }); };
+$("skip").onclick = () => { if (S.at < 4) { S.at = 4; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); } $("lv-4").scrollIntoView({ behavior: reduce ? "auto" : "smooth" }); };
 $("reset").onclick = () => { S = { at: 0, xp: 0, answers: {} }; save(); LEVELS.forEach((L, i) => renderLevel(i)); renderStops(); window.scrollTo(0, 0); };
 })();
 </script>
